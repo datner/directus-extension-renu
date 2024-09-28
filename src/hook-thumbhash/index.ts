@@ -1,19 +1,47 @@
-import type { AssetsService, FilesService, ItemsService } from "@directus/api/dist/services";
+import type { AssetsService, ItemsService } from "@directus/api/dist/services";
 import type { TransformationParams } from "@directus/api/dist/types";
-import { getMetadata } from "@directus/api/services/files/utils/get-metadata";
 import { defineHook } from "@directus/extensions-sdk";
-import { PassThrough } from "stream";
+import type { File } from "@directus/types";
 import { rgbaToThumbHash } from "thumbhash";
 
+function resizeImage(
+  originalWidth: number,
+  originalHeight: number,
+  maxWidth: number = 100,
+  maxHeight: number = 100,
+): { width: number; height: number } {
+  // Calculate the aspect ratio
+  const aspectRatio = originalWidth / originalHeight;
+
+  // Initialize new dimensions
+  let newWidth = originalWidth;
+  let newHeight = originalHeight;
+
+  // Check if the width exceeds the maximum width
+  if (newWidth > maxWidth) {
+    newWidth = maxWidth;
+    newHeight = newWidth / aspectRatio;
+  }
+
+  // Check if the height exceeds the maximum height
+  if (newHeight > maxHeight) {
+    newHeight = maxHeight;
+    newWidth = newHeight * aspectRatio;
+  }
+
+  return {
+    width: Math.round(newWidth),
+    height: Math.round(newHeight),
+  };
+}
 export default defineHook(({ action }, ctx) => {
   const services = ctx.services as {
     ItemsService: typeof ItemsService;
     AssetsService: typeof AssetsService;
-    FilesService: typeof FilesService;
   };
   const logger = ctx.logger.child({ extension: "Thumbhash" });
 
-  action("files.upload", async ({ payload, key }, { schema, database, accountability }) => {
+  action("files.upload", async ({ key }, { schema, database, accountability }) => {
     if (!schema) {
       logger.warn("Schema not found");
       return;
@@ -32,31 +60,24 @@ export default defineHook(({ action }, ctx) => {
 
     const transformationParams: TransformationParams = {
       withoutEnlargement: true,
+      fit: "inside",
       format: "jpg",
       quality: 30,
+      width: 100,
+      height: 100,
     };
-    if (payload.width >= payload.height) {
-      transformationParams.width = 100;
-    } else {
-      transformationParams.height = 100;
-    }
 
     const result = await assetService.getAsset(
       key,
       { transformationParams },
     );
 
-    const stream1 = new PassThrough(),
-      stream2 = new PassThrough();
+    const file = result.file as File;
 
-    result.stream.pipe(stream1);
-    result.stream.pipe(stream2);
+    const contents = await result.stream.toArray().then(Buffer.concat);
+    const meta = resizeImage(file.width!, file.height!);
 
-    const [meta, contents] = await Promise.all(
-      [getMetadata(stream1), stream2.toArray().then(Buffer.concat)],
-    );
-
-    const bytes = rgbaToThumbHash(meta.width!, meta.height!, contents);
+    const bytes = rgbaToThumbHash(meta.width, meta.height, contents);
 
     await sudoService.updateOne(key, {
       thumbhash: Buffer.from(bytes).toString("base64"),
